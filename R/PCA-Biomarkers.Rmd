@@ -1,0 +1,474 @@
+---
+title: "Analysis of PPS Data"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+We are going to start with processed data provided by Dr. Gregor
+Theilmeier available in the provided spreadsheet.
+
+```
+## Added ... option to function: installIfNeeded
+installIfNeeded <- function(packages, ...) {
+    installedPackages <- installed.packages()[, 1]
+    toInstall <- setdiff(packages, installedPackages)
+    if (length(toInstall) > 0) install.packages(toInstall, ...)
+}
+installIfNeeded(c("readxl", "dplyr",
+                  "cowplot", "ggplot2", "ggfortify",
+                  "elasticnet", "glmnet", "knitr"), repos="https://cloud.r-project.org")
+```
+
+```{r}
+set.seed(1782682)
+library(readxl)
+library(ggplot2)
+library(dplyr)
+spreadsheet <- "P1-Biomarker-Brad-Naras-short.xlsx"
+d <- read_excel(path = spreadsheet, sheet = 1)
+names(d) <- c("ID", "gender", "age", "cyanosis", "procedure", "expECCtime",
+              "expXclamp", "PPS", "orgfail", "ARF", "circfail", "lungfail",
+              "ventilator", "ICU", "hospital", "mortality", "timeOnCPB",
+              "xclamp", "circarrest", "bodyweight", "fluidbal", "relfluidbal",
+              "catecholamine", "infection", "antibiotics", "posBC", "IL1apre", "IL1apost",
+              "IL1aD", "IL2rapre", "IL2rapost", "IL2raD", "IL3pre", "IL3post",
+              "IL3D", "IL12pre", "IL12post", "IL12D", "IL16pre", "IL16post",
+              "IL16D", "IL18pre", "IL18post", "IL18D", "CTACKpre", "CTACKpost",
+              "CTACKD", "GROapre", "GROapost", "GROaD", "HGFpre", "HGFpost",
+              "HGFD", "ICAM1pre", "ICAM1post", "ICAM1D", "LIFpre", "LIFpost",
+              "LIFD", "MCP3pre", "MCP3post", "MCP3D", "MCSFpre", "MCSFpost",
+              "MCSFD", "MIFpre", "MIFpost", "MIFD", "MIGpre", "MIGpost", "MIGD",
+              "bNGFpre", "bNGFpost", "bNGFD", "SCFpre", "SCFpost", "SCFD",
+              "SCGFpre", "SCGFpost", "SCGFD", "SDF1apre", "SDF1apost", "SDF1aD",
+              "TNFbpre", "TNFbpost", "TNFbD", "TRAILpre", "TRAILpost", "TRAILD",
+              "IL1bpre", "IL1bpost", "IL1bD", "IL1rapre", "IL1rapost", "IL1raD",
+              "IL2pre", "IL2post", "IL2D", "IL4pre", "IL4post", "IL4D", "IL5pre",
+              "IL5post", "IL5D", "IL6pre", "IL6post", "IL6D", "IL7pre", "IL7post",
+              "IL7D", "IL8pre", "IL8post", "IL8D", "IL9pre", "IL9post", "IL9D",
+              "IL10pre", "IL10post", "IL10D", "IL12pre", "IL12post", "IL12D",
+              "IL13pre", "IL13post", "IL13D", "IL15pre", "IL15post", "IL15D",
+              "IL17pre", "IL17post", "IL17D", "EOTpre", "EOTpost", "EOTD",
+              "FGFbpre", "FGFbpost", "FGFbD", "GCSFpre", "GCSFpost", "GCSFD",
+              "GMCSFpre", "GMCSFpost", "GMCSFD", "IFNgpre", "IFNgpost", "IFNgD",
+              "IP10pre", "IP10post", "IP10D", "MCP1pre", "MCP1post", "MCP1D",
+              "MIP1apre", "MIP1apost", "MIP1aD", "MIP1bpre", "MIP1bpost", "MIP1bD",
+              "PDGFpre", "PDGFpost", "PDGFD", "RANTESpre", "RANTESpost", "RANTESD",
+              "TNFapre", "TNFapost", "TNFaD", "VEGFpre", "VEGFpost", "VEGFD")
+
+```
+
+## The Data
+
+The outcome is labelled `PPS` (0 or 1). Variables are named with
+suffixes `pre` and `post` and the difference (`post` - `pre`) is
+labelled with a suffix `D`. The cytokine data starts at column 27 (GT: I removed the RACHS1-Score, because it is not complete and will dampen the cytokine predictiveness. COuld compare results with and wothout RACHS1 later.)
+
+#GT: I removed all Cop and ADM values because they stem from a separate analysis and do not qualify as cytokines!
+
+```{r}
+naRows <- c(4:5, 7:8)
+d <- d[-naRows, ]
+colNames <- names(d)
+preBioNames <- grep("pre$", colNames[27:ncol(d)], value = TRUE)
+bioNames <- gsub("pre$", "", preBioNames)
+preBioData <- d[, preBioNames]
+postBioNames <- grep("post$", colNames[27:ncol(d)], value = TRUE)
+postBioData <- d[, postBioNames]
+difNames <- grep("D$", colNames[27:ncol(d)], value = TRUE)
+difData <- d[, difNames]
+nonBioNames <- setdiff(colNames, c(preBioNames, postBioNames, difNames))
+```
+
+## The Scientific Questions
+
+1. What variables are predictive of the `PPS` outcome pre-operatively?
+2. What variables are associated with the `PPS` outcome, using data
+both pre and post operation?
+3. How good is the prediction? How does it compare with the AUC
+   characteristics computed by the biostatistical firm hired by
+   Dr. Theilmeier?
+
+The following variables are known pre, and post operatively.
+
+```{r}
+preOpVars <- c("gender", "age", "cyanosis", "expECCtime",
+               "expXclamp", "bodyweight")
+postOpVars <- c("procedure", "orgfail", "ARF", "circfail", "lungfail",
+                "ventilator", "ICU", "hospital", "mortality", "timeOnCPB",
+                "xclamp", "circarrest", "fluidbal", "relfluidbal",
+                "catecholamine", "infection", "antibiotics", "posBC")
+```
+
+## Data Transformations
+
+We plot a few random biomarkers on the natural scale as well as the
+log scale to decide what transformation to use.
+
+```{r}
+makeBothPlots <- function(bioName) {
+    d[, bioName] %>%
+        unlist ->
+        value
+    p1 <- ggplot() + geom_histogram(mapping  = aes(x = value), fill = "brown") +
+        labs(x = bioName)
+    p2 <- ggplot() + geom_histogram(mapping  = aes(x = log(value + 1)), fill = "brown") +
+        labs(x = sprintf("log(%s)", bioName))
+    list(p1, p2)
+}
+```
+
+### Pre Op Biomarker values
+
+We look at the pre-op biomarkers.
+
+```{r}
+set.seed(16272)
+bms <- preBioNames[sample(seq_along(preBioNames), 5)]
+library(cowplot)
+
+```
+
+```{r}
+plot_grid(plotlist = makeBothPlots(bms[1]), ncol = 2)
+```
+
+
+```{r}
+plot_grid(plotlist = makeBothPlots(bms[2]), ncol = 2)
+```
+
+
+```{r}
+plot_grid(plotlist = makeBothPlots(bms[3]), ncol = 2)
+```
+
+
+```{r}
+plot_grid(plotlist = makeBothPlots(bms[4]), ncol = 2)
+```
+
+
+```{r}
+plot_grid(plotlist = makeBothPlots(bms[5]), ncol = 2)
+```
+
+
+### Difference in post/pre
+
+We look at the differences now. 
+
+```{r}
+set.seed(16272)
+bms <- difNames[sample(seq_along(difNames), 5)]
+```
+
+
+```{r}
+plot_grid(plotlist = makeBothPlots(bms[1]), ncol = 2)
+```
+
+
+```{r}
+plot_grid(plotlist = makeBothPlots(bms[2]), ncol = 2)
+```
+
+
+```{r}
+plot_grid(plotlist = makeBothPlots(bms[3]), ncol = 2)
+```
+
+
+```{r}
+plot_grid(plotlist = makeBothPlots(bms[4]), ncol = 2)
+```
+
+
+```{r}
+plot_grid(plotlist = makeBothPlots(bms[5]), ncol = 2)
+```
+
+### Using Logged biomarker data henceforth
+
+Based on the plots above, I transformed all the biomarker data to a
+log scale. It doesn't seem to make things worse!
+
+Specifically, `x` was transformed to `log(x + 1)` where `x` was either
+the pre or post data. For post-pre differences, I considered the
+difference of the logs.
+
+```{r}
+logPreBio <- apply(d[, preBioNames],
+                   2,
+                   function(x) log(x + 1))
+colnames(logPreBio) <- paste("Log", preBioNames, sep=".")
+logPostBio <- apply(d[, postBioNames],
+                    2,
+                    function(x) log(x + 1))
+colnames(logPostBio) <- paste("Log", postBioNames, sep=".")
+diff <- logPostBio - logPreBio
+colnames(diff) <- bioNames
+d <- data.frame(d, logPreBio, logPostBio, diff)
+d$response <- d$PPS
+d$PPS <- factor(d$PPS)
+```
+
+## A PCA plot of Pre-Op Biomarker Data.
+
+We look at the principal components.
+
+```{r}
+pcaCharts <- function(x) {
+    x.var <- x$sdev^2
+    x.pvar <- x.var/sum(x.var)
+    print("proportions of variance:")
+    d <- data.frame(pc = seq_along(x.var),
+                    prop = x.pvar,
+                    cum.prop. = cumsum(x.pvar))
+    # print(kable(d))
+  print(d)
+
+    par(mfrow=c(2,2))
+    plot(x.pvar,xlab="Principal component", ylab="Proportion of variance explained", ylim=c(0,1), type='b')
+    plot(cumsum(x.pvar),xlab="Principal component", ylab="Cumulative Proportion of variance explained", ylim=c(0,1), type='b')
+    screeplot(x)
+    screeplot(x,type="l")
+    par(mfrow=c(1,1))
+}
+```
+
+```{r}
+pc <- prcomp(logPreBio, scale = TRUE)
+pcaCharts(pc)
+```
+
+
+```{r}
+library(ggfortify)
+df <- d[, preBioNames]
+autoplot(prcomp(df), data = d, colour = 'PPS')
+```
+
+### Conclusion
+
+_There is an odd pattern here._ Several of the non-PPS patients are on
+a straight line, but there is still no clear separation. There is no
+clear boundary though.
+
+
+## Logistic Regression on the Pre-OP variables and biomarkers
+
+```{r}
+library(glmnet)
+varsIncluded <- c("age", "gender", "bodyweight", "cyanosis", "expECCtime", "expXclamp")
+varsIncludedpost<- c("age", "gender", "bodyweight", "cyanosis", "timeOnCPB",
+              "xclamp", "circarrest")
+# I am introducing the real POST-parameters for the analysis of the differences here, that we can use to construct the model pre/post! Am I doing this right? I also removed a double of "cyanosis" that had creeped into the list.
+
+xData <- as.matrix(cbind(d[, varsIncluded], logPreBio))
+response <- d$response
+print(cbind(1:ncol(xData), colnames(xData)))
+```
+
+
+Fit the model.
+
+```{r}
+fit <- glmnet(x = xData, y = response, family = "binomial")
+plot(fit, xvar = "dev", label = TRUE)
+```
+
+Cross validation.
+
+```{r}
+cvfit <- cv.glmnet(xData, y = response, family = "binomial", type.measure = "class")
+plot(cvfit)
+```
+
+Print the $\lambda$ corresponding to the CV fit.
+
+```{r}
+cat("Minimum", cvfit$lambda.min, "\n")
+cat("Lambda 1se", cvfit$lambda.1se, "\n")
+```
+
+So what are the features corresponding to the best $\lambda_{1se}$ and
+$\lambda_{1se}$ fits?
+
+```{r}
+opt.lam <- c(cvfit$lambda.min, cvfit$lambda.1se)
+coef(cvfit, s = opt.lam)
+```
+
+Let us use AUC as the measure of fit.  We have to use `nfolds = 5` to
+account for the small sample sizes in cross validation.
+
+
+```{r}
+set.seed(8337)
+cvfit <- cv.glmnet(xData, y = response, family = "binomial", type.measure = "auc", nfolds = 5)
+plot(cvfit)
+```
+
+Print the $\lambda$ corresponding to the CV fit.
+
+```{r}
+cat("Minimum", cvfit$lambda.min, "\n")
+cat("Lambda 1se", cvfit$lambda.1se, "\n")
+```
+
+Let us see what variables are given by these two fits.
+
+```{r}
+opt.lam <- c(cvfit$lambda.min, cvfit$lambda.1se)
+coef(cvfit, s = opt.lam)
+```
+
+## Always including some non Biomarker variables in the model
+
+```{r}
+set.seed(8122337)
+cvfit <- cv.glmnet(xData, y = response, family = "binomial", type.measure = "auc", nfolds = 5,
+                   penalty.factor = c(rep(0, length(varsIncluded)),
+                                      rep(1, nrow(xData) - length(varsIncluded))))
+
+plot(cvfit)
+```
+
+Print the $\lambda$ corresponding to the CV fit.
+
+```{r}
+cat("Minimum", cvfit$lambda.min, "\n")
+cat("Lambda 1se", cvfit$lambda.1se, "\n")
+```
+
+Let us see what variables are given by these two fits.
+
+```{r}
+opt.lam <- c(cvfit$lambda.min, cvfit$lambda.1se)
+coef(cvfit, s = opt.lam)
+```
+
+I believe including all the non-biomarker variables is problematic as
+it looks like many of them are correlated and they bump out many
+biomarkers. In order to be conservative, it is probably sufficient to
+keep just `gender` and `RACHS` score (which takes `age` and
+`bodyweight` into account, if I remember correctly.)
+
+### Conclusion
+
+Unfortunately, there any signal in the biomarker data seems to be
+correlated with non-biomarker variables to a high degree. Consider for
+example, `bodyweight`. Here is the correlation table of `bodyweight`
+against the pre-op biomarkers.
+
+
+
+```{r}
+bdywt.cor <- tibble(biomarker = preBioNames,
+                    corr = sapply(preBioNames, function(x) cor(d[, x], d[, "bodyweight"])))
+kable(bdywt.cor %>% arrange(corr))
+```
+
+
+
+The biomarkers are not adding much beyond these variables.
+
+## Logistic Regression on the difference
+
+
+```{r}
+library(glmnet)
+xData <- as.matrix(cbind(d[, varsIncludedpost], diff))
+response <- d$response
+print(cbind(1:ncol(xData), colnames(xData)))
+```
+
+Fit the model.
+
+```{r}
+fit <- glmnet(x = xData, y = response, family = "binomial")
+plot(fit, xvar = "dev", label = TRUE)
+```
+
+Cross validation.
+
+```{r}
+cvfit <- cv.glmnet(xData, y = response, family = "binomial", type.measure = "class")
+plot(cvfit)
+```
+
+Print the $\lambda$ corresponding to the CV fit.
+
+```{r}
+cat("Minimum", cvfit$lambda.min, "\n")
+cat("Lambda 1se", cvfit$lambda.1se, "\n")
+```
+
+So what are the features corresponding to the best $\lambda_{1se}$ and
+$\lambda_{1se}$ fits?
+
+```{r}
+opt.lam <- c(cvfit$lambda.min, cvfit$lambda.1se)
+coef(cvfit, s = opt.lam)
+```
+
+Let us use AUC as the measure of fit.  We have to use `nfolds = 5` to
+account for the small sample sizes in cross validation.
+
+
+```{r}
+set.seed(8337)
+cvfit <- cv.glmnet(xData, y = response, family = "binomial", type.measure = "auc", nfolds = 5)
+plot(cvfit)
+
+Print the $\lambda$ corresponding to the CV fit.
+
+```{r}
+cat("Minimum", cvfit$lambda.min, "\n")
+cat("Lambda 1se", cvfit$lambda.1se, "\n")
+```
+
+Let us see what variables are given by these two fits.
+
+```{r}
+opt.lam <- c(cvfit$lambda.min, cvfit$lambda.1se)
+coef(cvfit, s = opt.lam)
+```
+
+
+## Always including some non Biomarker variables in the model
+
+```{r}
+set.seed(8122337)
+cvfit <- cv.glmnet(xData, y = response, family = "binomial", type.measure = "auc", nfolds = 5,
+                   penalty.factor = c(rep(0, length(varsIncludedpost)),
+                                      rep(1, nrow(xData) - length(varsIncludedpost))))
+
+plot(cvfit)
+```
+
+Print the $\lambda$ corresponding to the CV fit.
+
+```{r}
+cat("Minimum", cvfit$lambda.min, "\n")
+cat("Lambda 1se", cvfit$lambda.1se, "\n")
+```
+
+Let us see what variables are given by these two fits.
+
+```{r}
+opt.lam <- c(cvfit$lambda.min, cvfit$lambda.1se)
+coef(cvfit, s = opt.lam)
+```
+
+## Conclusion
+
+Once again there is not much of a signal here from the biomarkers.
+
+
+## Session Info
+```{r}
+
+sessionInfo()
+```
